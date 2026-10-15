@@ -1,150 +1,694 @@
-/* UKME ERP local server — keeps your data either
-     (a) in MongoDB   — set MONGODB_URI (in a .env file next to this file, or as an environment variable), or
-     (b) in ONE file on this computer (like a QuickBooks company file): UKME-ERP-Data/company.json
-         — used automatically when MONGODB_URI is not set (zero dependencies, only Node.js).
-   Run:  node server.js   then open  http://127.0.0.1:3000
-   MongoDB mode needs one-time:  npm install   (installs the official "mongodb" driver). */
-const http = require("http"), fs = require("fs"), path = require("path"), os = require("os");
-const PORT = Number(process.env.PORT) || 3000, HOST = "127.0.0.1";
-const ROOT = __dirname;
-/* tiny .env reader (no dependency): KEY=VALUE lines in ./.env, real environment variables win */
-try{
-  fs.readFileSync(path.join(ROOT, ".env"), "utf8").split(/\r?\n/).forEach(l => {
-    const m = l.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/); if(!m || l.trim().startsWith("#")) return;
-    const v = m[2].replace(/^(["'])(.*)\1$/, "$2"); if(process.env[m[1]] === undefined) process.env[m[1]] = v;
-  });
-}catch(e){ /* no .env — fine */ }
-const MONGO_URI = (process.env.MONGODB_URI || "").trim(), MONGO_DB = (process.env.MONGODB_DB || "ukme_erp").trim();
-/* Data lives OUTSIDE the code folder (C:\Users\<you>\UKME-ERP-Data by default), so unzipping a new
-   version of the app anywhere never touches or loses your company file. Override with UKME_DATA_DIR. */
-const DATA_DIR = process.env.UKME_DATA_DIR || path.join(os.homedir(), "UKME-ERP-Data"), BACKUP_DIR = path.join(DATA_DIR, "backups");
-const FILE = path.join(DATA_DIR, "company.json"), KEEP_BACKUPS = 60;
-fs.mkdirSync(BACKUP_DIR, { recursive: true });
-// one-time move: if an older version kept its data inside the app folder (./data), bring it over
-const OLD = path.join(ROOT, "data");
-if(!fs.existsSync(FILE) && fs.existsSync(path.join(OLD, "company.json")) && path.resolve(OLD) !== path.resolve(DATA_DIR)){
-  fs.copyFileSync(path.join(OLD, "company.json"), FILE);
-  const ob = path.join(OLD, "backups"); if(fs.existsSync(ob)) fs.readdirSync(ob).forEach(f => fs.copyFileSync(path.join(ob, f), path.join(BACKUP_DIR, f)));
-  console.log("Moved your existing data from ./data to " + DATA_DIR);
-}
-const TYPES = { ".html":"text/html; charset=utf-8", ".js":"text/javascript", ".css":"text/css", ".png":"image/png", ".txt":"text/plain", ".md":"text/plain; charset=utf-8" };
+```javascript
+/*
+ * UKME ERP server for local use and Render hosting.
+ *
+ * Local:   node server.js  -> http://127.0.0.1:3000
+ * Render:  binds to 0.0.0.0 and uses process.env.PORT.
+ *
+ * Render Environment Variables required:
+ *   MONGODB_URI   = your MongoDB Atlas connection string
+ *   MONGODB_DB    = ukme_erp
+ *   ERP_USERNAME  = your private ERP login username
+ *   ERP_PASSWORD  = a strong, unique password
+ *
+ * Never commit .env or database credentials to GitHub.
+ */
 
-/* ---------- storage: file (default) or MongoDB ---------- */
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
+
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
+const ROOT = __dirname;
+
+/* Load .env variables for local development. */
+try {
+  fs.readFileSync(path.join(ROOT, ".env"), "utf8")
+    .split(/\r?\n/)
+    .forEach((line) => {
+      if (!line.trim() || line.trim().startsWith("#")) return;
+
+      const match = line.match(
+        /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/
+      );
+
+      if (!match) return;
+
+      const value = match[2].replace(/^(['"])(.*)\1$/, "$2");
+
+      if (process.env[match[1]] === undefined) {
+        process.env[match[1]] = value;
+      }
+    });
+} catch (_) {
+  // A .env file is optional.
+}
+
+const MONGO_URI = (process.env.MONGODB_URI || "").trim();
+const MONGO_DB = (process.env.MONGODB_DB || "ukme_erp").trim();
+const ERP_USERNAME = process.env.ERP_USERNAME || "";
+const ERP_PASSWORD = process.env.ERP_PASSWORD || "";
+
+/* Require MongoDB and authentication on Render. */
+if (process.env.RENDER && !MONGO_URI) {
+  console.error(
+    "Startup blocked: set MONGODB_URI in Render Environment."
+  );
+  process.exit(1);
+}
+
+if (process.env.RENDER && (!ERP_USERNAME || !ERP_PASSWORD)) {
+  console.error(
+    "Startup blocked: set ERP_USERNAME and ERP_PASSWORD in Render Environment."
+  );
+  process.exit(1);
+}
+
+const DATA_DIR =
+  process.env.UKME_DATA_DIR ||
+  path.join(os.homedir(), "UKME-ERP-Data");
+
+const BACKUP_DIR = path.join(DATA_DIR, "backups");
+const FILE = path.join(DATA_DIR, "company.json");
+const KEEP_BACKUPS = 60;
+
+fs.mkdirSync(BACKUP_DIR, { recursive: true });
+
+/* Migrate an existing local data file if available. */
+const OLD = path.join(ROOT, "data");
+
+if (
+  !fs.existsSync(FILE) &&
+  fs.existsSync(path.join(OLD, "company.json")) &&
+  path.resolve(OLD) !== path.resolve(DATA_DIR)
+) {
+  fs.copyFileSync(path.join(OLD, "company.json"), FILE);
+
+  const oldBackups = path.join(OLD, "backups");
+
+  if (fs.existsSync(oldBackups)) {
+    for (const name of fs.readdirSync(oldBackups)) {
+      const from = path.join(oldBackups, name);
+      const to = path.join(BACKUP_DIR, name);
+
+      if (fs.statSync(from).isFile()) {
+        fs.copyFileSync(from, to);
+      }
+    }
+  }
+
+  console.log("Moved existing local data from ./data to " + DATA_DIR);
+}
+
+const TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/plain; charset=utf-8"
+};
+
+/* Local file storage fallback. */
 const fileStore = {
   name: "File: " + FILE,
-  async init(){},
-  async raw(){ return fs.existsSync(FILE) ? fs.readFileSync(FILE) : null; },
-  async save(parsed, body){ fs.writeFileSync(FILE + ".tmp", body); fs.renameSync(FILE + ".tmp", FILE); },   // atomic write: never a half-written file
-  async remove(){ if(fs.existsSync(FILE)) fs.unlinkSync(FILE); }
+
+  async init() {},
+
+  async raw() {
+    return fs.existsSync(FILE)
+      ? fs.readFileSync(FILE)
+      : null;
+  },
+
+  async save(parsed, body) {
+    const data = body || Buffer.from(JSON.stringify(parsed));
+
+    fs.writeFileSync(FILE + ".tmp", data);
+    fs.renameSync(FILE + ".tmp", FILE);
+  },
+
+  async remove() {
+    if (fs.existsSync(FILE)) {
+      fs.unlinkSync(FILE);
+    }
+  }
 };
-/* MongoDB layout:  invoices / purchase_orders = one document per record (_id = record id),
-                    meta = ONE document (_id "company") with everything else (settings, journal entries, assets, loans, …). */
+
+/*
+ * MongoDB collections:
+ * invoices
+ * purchase_orders
+ * meta
+ */
 const mongoStore = {
   name: "MongoDB: " + MONGO_DB,
-  client: null, db: null,
-  async init(){
+  client: null,
+  db: null,
+
+  async init() {
     let MongoClient;
-    try{ ({ MongoClient } = require("mongodb")); }
-    catch(e){ throw new Error('MongoDB driver not installed. Run  npm install  in this folder, then start again.'); }
-    this.client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 8000 });
-    await this.client.connect();
-    this.db = this.client.db(MONGO_DB);
-    await this.db.command({ ping: 1 });
-    // first run: if MongoDB is empty but an old company.json exists, import it once
-    const has = await this.db.collection("meta").findOne({ _id: "company" });
-    if(!has && fs.existsSync(FILE)){
-      try{ const old = JSON.parse(fs.readFileSync(FILE, "utf8")); await this.save(old); console.log("Imported your existing company.json into MongoDB."); }catch(e){ console.warn("Could not import company.json:", e.message); }
+
+    try {
+      ({ MongoClient } = require("mongodb"));
+    } catch (_) {
+      throw new Error(
+        'MongoDB driver missing. Run "npm install" in the project folder.'
+      );
     }
+
+    this.client = new MongoClient(MONGO_URI, {
+      serverSelectionTimeoutMS: 15000
+    });
+
+    await this.client.connect();
+
+    this.db = this.client.db(MONGO_DB);
+
+    await this.db.command({ ping: 1 });
+
+    /*
+     * Import company.json only when the MongoDB company
+     * metadata record does not exist.
+     */
+    const existingMeta = await this.db
+      .collection("meta")
+      .findOne({ _id: "company" });
+
+    if (!existingMeta && fs.existsSync(FILE)) {
+      try {
+        const oldData = JSON.parse(
+          fs.readFileSync(FILE, "utf8")
+        );
+
+        if (
+          oldData &&
+          Array.isArray(oldData.invoices) &&
+          Array.isArray(oldData.purchaseOrders)
+        ) {
+          await this.save(oldData);
+          console.log("Imported company.json into MongoDB.");
+        } else {
+          console.warn(
+            "company.json was not imported: unexpected data format."
+          );
+        }
+      } catch (error) {
+        console.warn(
+          "Could not import company.json:",
+          error.message
+        );
+      }
+    }
+
+    console.log("MongoDB connection verified.");
   },
-  async snapshot(){
-    const meta = await this.db.collection("meta").findOne({ _id: "company" });
-    if(!meta) return null;
-    const invoices = await this.db.collection("invoices").find({}).toArray(), purchaseOrders = await this.db.collection("purchase_orders").find({}).toArray();
-    const strip = d => { const { _id, ...rest } = d; return rest; };       // records keep their own "id" field
-    const { _id, ...m } = meta;
-    return Object.assign(m, { invoices: invoices.map(strip), purchaseOrders: purchaseOrders.map(strip) });
-  },
-  async raw(){ const snap = await this.snapshot(); return snap ? Buffer.from(JSON.stringify(snap)) : null; },
-  async save(parsed){
-    const { invoices, purchaseOrders, ...rest } = parsed;
-    const sync = async (name, list) => {
-      const col = this.db.collection(name), ids = [];
-      const ops = list.map(d => {
-        if(!d || !d.id) throw new Error("A record in " + name + " has no id");
-        ids.push(d.id);
-        return { replaceOne: { filter: { _id: d.id }, replacement: Object.assign({}, d, { _id: d.id }), upsert: true } };
-      });
-      for(let i = 0; i < ops.length; i += 1000) await col.bulkWrite(ops.slice(i, i + 1000), { ordered: false });
-      await col.deleteMany({ _id: { $nin: ids } });                        // records deleted in the app are deleted here too
+
+  async snapshot() {
+    const meta = await this.db
+      .collection("meta")
+      .findOne({ _id: "company" });
+
+    if (!meta) return null;
+
+    const invoices = await this.db
+      .collection("invoices")
+      .find({})
+      .toArray();
+
+    const purchaseOrders = await this.db
+      .collection("purchase_orders")
+      .find({})
+      .toArray();
+
+    const stripId = (doc) => {
+      const { _id, ...rest } = doc;
+      return rest;
     };
-    await sync("invoices", invoices); await sync("purchase_orders", purchaseOrders);
-    await this.db.collection("meta").replaceOne({ _id: "company" }, Object.assign({}, rest, { _id: "company", savedAt: new Date().toISOString() }), { upsert: true });
+
+    const { _id, ...rest } = meta;
+
+    return Object.assign(rest, {
+      invoices: invoices.map(stripId),
+      purchaseOrders: purchaseOrders.map(stripId)
+    });
   },
-  async remove(){ await Promise.all(["invoices", "purchase_orders", "meta"].map(n => this.db.collection(n).deleteMany({}))); }
+
+  async raw() {
+    const data = await this.snapshot();
+
+    return data
+      ? Buffer.from(JSON.stringify(data))
+      : null;
+  },
+
+  async save(parsed) {
+    const { invoices, purchaseOrders, ...rest } = parsed;
+
+    const syncCollection = async (
+      collectionName,
+      records
+    ) => {
+      const collection = this.db.collection(collectionName);
+      const ids = [];
+
+      const operations = records.map((record) => {
+        if (
+          !record ||
+          record.id === undefined ||
+          record.id === null ||
+          record.id === ""
+        ) {
+          throw new Error(
+            "A record in " + collectionName + " has no id."
+          );
+        }
+
+        ids.push(record.id);
+
+        return {
+          replaceOne: {
+            filter: { _id: record.id },
+            replacement: Object.assign({}, record, {
+              _id: record.id
+            }),
+            upsert: true
+          }
+        };
+      });
+
+      for (let i = 0; i < operations.length; i += 500) {
+        await collection.bulkWrite(
+          operations.slice(i, i + 500),
+          { ordered: true }
+        );
+      }
+
+      await collection.deleteMany({
+        _id: { $nin: ids }
+      });
+    };
+
+    await syncCollection("invoices", invoices);
+
+    await syncCollection(
+      "purchase_orders",
+      purchaseOrders
+    );
+
+    await this.db.collection("meta").replaceOne(
+      { _id: "company" },
+      Object.assign({}, rest, {
+        _id: "company",
+        savedAt: new Date().toISOString()
+      }),
+      { upsert: true }
+    );
+  },
+
+  async remove() {
+    await Promise.all(
+      ["invoices", "purchase_orders", "meta"].map(
+        (name) =>
+          this.db.collection(name).deleteMany({})
+      )
+    );
+  }
 };
+
 const store = MONGO_URI ? mongoStore : fileStore;
 
-async function backup(tag){                 // keep a JSON copy in the backups folder (one per day + before any reset)
-  const cur = await store.raw();
-  if(!cur) return;
-  const stamp = new Date().toISOString().slice(0,10), name = tag ? `company-${tag}-${Date.now()}.json` : `company-${stamp}.json`;
-  const dest = path.join(BACKUP_DIR, name);
-  if(!tag && fs.existsSync(dest)) return;
-  fs.writeFileSync(dest, cur);
-  const all = fs.readdirSync(BACKUP_DIR).sort();
-  all.slice(0, Math.max(0, all.length - KEEP_BACKUPS)).forEach(f => fs.unlinkSync(path.join(BACKUP_DIR, f)));
-}
-function send(res, code, body, type){ res.writeHead(code, { "Content-Type": type || "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer" }); res.end(body); }
+/* Create JSON backups before changes and resets. */
+async function backup(tag) {
+  const current = await store.raw();
 
-const MAX_BODY = 100e6;                     // 100 MB is far more than any company file (was 500 MB held in memory)
-const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
-async function handle(req, res){
-  // DNS-rebinding guard: only answer requests addressed to this machine's own address
-  if(!ALLOWED_HOSTS.has(String(req.headers.host||"").toLowerCase())) return send(res, 403, "Forbidden", "text/plain");
-  // a web page on ANOTHER site must not be able to read or overwrite the company file
+  if (!current) return;
+
+  const date = new Date().toISOString().slice(0, 10);
+
+  const name = tag
+    ? `company-${tag}-${Date.now()}.json`
+    : `company-${date}.json`;
+
+  const destination = path.join(BACKUP_DIR, name);
+
+  if (!tag && fs.existsSync(destination)) return;
+
+  fs.writeFileSync(destination, current);
+
+  const files = fs.readdirSync(BACKUP_DIR)
+    .filter((item) =>
+      fs.statSync(path.join(BACKUP_DIR, item)).isFile()
+    )
+    .sort();
+
+  files
+    .slice(0, Math.max(0, files.length - KEEP_BACKUPS))
+    .forEach((item) => {
+      fs.unlinkSync(path.join(BACKUP_DIR, item));
+    });
+}
+
+function send(res, status, body, contentType) {
+  res.writeHead(status, {
+    "Content-Type":
+      contentType || "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer"
+  });
+
+  res.end(body);
+}
+
+const MAX_BODY = 100 * 1024 * 1024;
+
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+
+  return (
+    left.length === right.length &&
+    crypto.timingSafeEqual(left, right)
+  );
+}
+
+function isAuthenticated(req) {
+  /*
+   * Local mode works without login credentials.
+   * Render requires the configured username and password.
+   */
+  if (!ERP_USERNAME || !ERP_PASSWORD) {
+    return !process.env.RENDER;
+  }
+
+  const header = req.headers.authorization || "";
+
+  if (!header.startsWith("Basic ")) {
+    return false;
+  }
+
+  let decoded;
+
+  try {
+    decoded = Buffer.from(
+      header.slice(6),
+      "base64"
+    ).toString("utf8");
+  } catch (_) {
+    return false;
+  }
+
+  const separator = decoded.indexOf(":");
+
+  if (separator < 0) return false;
+
+  const username = decoded.slice(0, separator);
+  const password = decoded.slice(separator + 1);
+
+  return (
+    safeEqual(username, ERP_USERNAME) &&
+    safeEqual(password, ERP_PASSWORD)
+  );
+}
+
+async function handle(req, res) {
+  /* Protect the ERP page and API. */
+  if (!isAuthenticated(req)) {
+    res.writeHead(401, {
+      "WWW-Authenticate":
+        'Basic realm="UKME ERP", charset="UTF-8"',
+      "Cache-Control": "no-store",
+      "Content-Type": "text/plain; charset=utf-8"
+    });
+
+    return res.end("Authentication required.");
+  }
+
+  /* Reject cross-origin requests. */
   const origin = req.headers.origin;
-  if(origin && !ALLOWED_HOSTS.has(String(origin).replace(/^https?:\/\//,"").toLowerCase())) return send(res, 403, "Forbidden", "text/plain");
-  let url;
-  try{ url = decodeURIComponent(req.url.split("?")[0]); }
-  catch(e){ return send(res, 400, "Bad request", "text/plain"); }
-  if(url === "/api/data"){
-    if(req.method === "GET"){
-      const cur = await store.raw();
-      return cur ? send(res, 200, cur) : send(res, 404, '{"empty":true}');
+
+  if (origin) {
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+
+      const requestHost = String(
+        req.headers.host || ""
+      ).toLowerCase();
+
+      if (
+        !requestHost ||
+        originHost !== requestHost
+      ) {
+        return send(
+          res,
+          403,
+          "Forbidden",
+          "text/plain; charset=utf-8"
+        );
+      }
+    } catch (_) {
+      return send(
+        res,
+        403,
+        "Forbidden",
+        "text/plain; charset=utf-8"
+      );
     }
-    if(req.method === "PUT"){
-      const chunks = []; let size = 0;
-      let tooBig = false;
-      req.on("data", c => { size += c.length; if(size > MAX_BODY){ tooBig = true; } else if(!tooBig) chunks.push(c); });
-      req.on("end", async () => {
-        if(tooBig) return send(res, 413, '{"error":"Payload too large"}');
-        try{
-          const body = Buffer.concat(chunks);
-          const parsed = JSON.parse(body);                                 // refuse anything that isn't valid JSON
-          // ...and anything that isn't a real company file (an empty/garbage PUT must never overwrite good data)
-          if(!parsed || typeof parsed !== "object" || !Array.isArray(parsed.invoices) || !Array.isArray(parsed.purchaseOrders)) throw new Error("Not a valid company file");
-          await backup();
-          await store.save(parsed, body);
-          send(res, 200, '{"ok":true}');
-        }catch(e){ send(res, 400, JSON.stringify({ error: String(e.message) })); }
+  }
+
+  let url;
+
+  try {
+    url = decodeURIComponent(
+      (req.url || "/").split("?")[0]
+    );
+  } catch (_) {
+    return send(
+      res,
+      400,
+      "Bad request",
+      "text/plain; charset=utf-8"
+    );
+  }
+
+  /* ERP data API. */
+  if (url === "/api/data") {
+    if (req.method === "GET") {
+      const current = await store.raw();
+
+      return current
+        ? send(res, 200, current)
+        : send(res, 404, '{"empty":true}');
+    }
+
+    if (req.method === "PUT") {
+      const chunks = [];
+      let size = 0;
+      let tooLarge = false;
+
+      req.on("data", (chunk) => {
+        size += chunk.length;
+
+        if (size > MAX_BODY) {
+          tooLarge = true;
+        } else if (!tooLarge) {
+          chunks.push(chunk);
+        }
       });
+
+      req.on("end", async () => {
+        if (tooLarge) {
+          return send(
+            res,
+            413,
+            '{"error":"Payload too large"}'
+          );
+        }
+
+        try {
+          const body = Buffer.concat(chunks);
+
+          const parsed = JSON.parse(
+            body.toString("utf8")
+          );
+
+          if (
+            !parsed ||
+            typeof parsed !== "object" ||
+            !Array.isArray(parsed.invoices) ||
+            !Array.isArray(parsed.purchaseOrders)
+          ) {
+            throw new Error(
+              "Not a valid company file: invoices and purchaseOrders must be arrays."
+            );
+          }
+
+          await backup();
+
+          await store.save(parsed, body);
+
+          return send(res, 200, '{"ok":true}');
+        } catch (error) {
+          console.error(
+            "Save failed:",
+            error.message
+          );
+
+          return send(
+            res,
+            400,
+            JSON.stringify({
+              error: error.message
+            })
+          );
+        }
+      });
+
       return;
     }
-    if(req.method === "DELETE"){ await backup("before-reset"); await store.remove(); return send(res, 200, '{"ok":true}'); }
-    return send(res, 405, "{}");
+
+    if (req.method === "DELETE") {
+      await backup("before-reset");
+
+      await store.remove();
+
+      return send(res, 200, '{"ok":true}');
+    }
+
+    return send(
+      res,
+      405,
+      '{"error":"Method not allowed"}'
+    );
   }
-  // static files — only index.html and /assets, never data/ or server.js
-  const rel = url === "/" ? "/index.html" : url;
-  if(rel !== "/index.html" && !rel.startsWith("/assets/")) return send(res, 404, "Not found", "text/plain");
-  const fp = path.resolve(ROOT, "." + rel), ASSETS = path.join(ROOT, "assets") + path.sep;
-  if(!(fp === path.join(ROOT, "index.html") || fp.startsWith(ASSETS)) || !fs.existsSync(fp) || fs.statSync(fp).isDirectory()) return send(res, 404, "Not found", "text/plain");
-  send(res, 200, fs.readFileSync(fp), TYPES[path.extname(fp)] || "application/octet-stream");
+
+  /*
+   * Serve only index.html and assets.
+   * Never expose server.js, .env, or data files.
+   */
+  const relative =
+    url === "/" ? "/index.html" : url;
+
+  if (
+    relative !== "/index.html" &&
+    !relative.startsWith("/assets/")
+  ) {
+    return send(
+      res,
+      404,
+      "Not found",
+      "text/plain; charset=utf-8"
+    );
+  }
+
+  const filePath = path.resolve(
+    ROOT,
+    "." + relative
+  );
+
+  const assetsDir =
+    path.join(ROOT, "assets") + path.sep;
+
+  const isAllowedFile =
+    filePath === path.join(ROOT, "index.html") ||
+    filePath.startsWith(assetsDir);
+
+  if (
+    !isAllowedFile ||
+    !fs.existsSync(filePath) ||
+    !fs.statSync(filePath).isFile()
+  ) {
+    return send(
+      res,
+      404,
+      "Not found",
+      "text/plain; charset=utf-8"
+    );
+  }
+
+  return send(
+    res,
+    200,
+    fs.readFileSync(filePath),
+    TYPES[path.extname(filePath).toLowerCase()] ||
+      "application/octet-stream"
+  );
 }
-function start(){
-  http.createServer((req, res) => {
-    handle(req, res).catch(e => { console.error(e); try{ send(res, 500, '{"error":"Server error"}'); }catch(_){} });   // one bad request can never stop the server
-  }).listen(PORT, HOST, () => {
-    console.log(`\nUKME ERP running:  http://${HOST}:${PORT}\nData stored in:    ${store.name}\nBackups (JSON):    ${BACKUP_DIR}\n\nKeep this window open while working. Ctrl+C to stop.\n`);
-  }).on("error", e => { console.error(e.code === "EADDRINUSE" ? `Port ${PORT} is busy — the app may already be running at http://${HOST}:${PORT}` : e); process.exit(1); });
+
+function start() {
+  const server = http.createServer(
+    (req, res) => {
+      handle(req, res).catch((error) => {
+        console.error(
+          "Request failed:",
+          error
+        );
+
+        if (!res.headersSent) {
+          send(
+            res,
+            500,
+            '{"error":"Internal server error"}'
+          );
+        } else {
+          res.destroy();
+        }
+      });
+    }
+  );
+
+  server.listen(PORT, HOST, () => {
+    console.log(
+      "\nUKME ERP running on " + HOST + ":" + PORT
+    );
+
+    console.log(
+      "Data storage: " + store.name
+    );
+
+    console.log(
+      "JSON backup directory: " + BACKUP_DIR
+    );
+
+    if (process.env.RENDER) {
+      console.log(
+        "Render deployment: port binding configured."
+      );
+
+      console.log(
+        "ERP login protection: enabled."
+      );
+    }
+  });
+
+  server.on("error", (error) => {
+    console.error(
+      "Server failed to start:",
+      error
+    );
+
+    process.exit(1);
+  });
 }
-store.init().then(start).catch(e => { console.error("\nCould not start:", e.message, "\n"); process.exit(1); });
+
+store.init()
+  .then(start)
+  .catch((error) => {
+    console.error(
+      "\nCould not start UKME ERP:",
+      error.message,
+      "\n"
+    );
+
+    process.exit(1);
+  });
+```
