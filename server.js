@@ -1,19 +1,3 @@
-```javascript
-/*
- * UKME ERP server for local use and Render hosting.
- *
- * Local:   node server.js  -> http://127.0.0.1:3000
- * Render:  binds to 0.0.0.0 and uses process.env.PORT.
- *
- * Render Environment Variables required:
- *   MONGODB_URI   = your MongoDB Atlas connection string
- *   MONGODB_DB    = ukme_erp
- *   ERP_USERNAME  = your private ERP login username
- *   ERP_PASSWORD  = a strong, unique password
- *
- * Never commit .env or database credentials to GitHub.
- */
-
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -691,4 +675,3 @@ store.init()
 
     process.exit(1);
   });
-```
