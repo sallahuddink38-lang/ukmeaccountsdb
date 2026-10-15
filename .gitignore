@@ -1,0 +1,7 @@
+node_modules/
+.env
+.env.*
+!.env.example
+UKME-ERP-Data/
+backups/
+*.log
